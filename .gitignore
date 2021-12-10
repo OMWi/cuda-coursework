@@ -1,0 +1,7 @@
+temp/
+.vscode/
+
+*.exe
+*.exp
+*.lib
+*.pdb
