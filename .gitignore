@@ -5,3 +5,4 @@ temp/
 *.exp
 *.lib
 *.pdb
+*.txt

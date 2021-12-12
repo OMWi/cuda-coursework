@@ -1,17 +1,39 @@
-#include <iostream>
+#include <stdio.h>
 #include <vector>
-#include <algorithm>
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+#include <iostream>
+#include <fstream>
+// #include "cuda_runtime.h"
+// #include "device_launch_parameters.h"
 
 using namespace std;
-// #define idx(c, x, y, C, X, Y) ((x) + (X) * ((y) + (Y) * (c)))
+
+
 // #define f_idx(a, c, x, y, A, C, X, Y) ((x) + (X) * ((y) + (Y) * ((c) + (C) * (a))))
 
 #define ReLU(v) (max((v), 0.0f))
 
 #define idx(ch, row, col, size) ((ch)*(size)*(size) + (row)*(size) + col)
 #define f_idx(inpCh, outCh, InpCh) ((inpCh) + (InpCh*outCh))
+
+void printVector2d(vector<float> vec, int size, int channel) {
+   printf("Channel %d\n", channel);
+   for (int y = 0; y < size; y++) {
+      for (int x = 0; x < size; x++)
+         printf("%f ", vec[idx(channel, y, x, size)]);
+      printf("\n");
+   }
+   printf("\n");
+}
+
+void printFilter2(vector<float> f, int inputChannels, int outputChannels) {
+   printf("Filter 2:\n");
+   for (int o = 0; o < outputChannels; o++) {
+      for (int i = 0; i < inputChannels; i++)
+         printf("%f ", f[f_idx(i, o, inputChannels)]);
+      printf("\n");
+   }
+   printf("\n");
+}
 
 __shared__ float buffer[];
 __global__ void depthwise_separable_convolution(
@@ -22,13 +44,13 @@ __global__ void depthwise_separable_convolution(
    const int x = blockIdx.x;
    const int y = blockIdx.y;
    const int ch = threadIdx.x;
-
    float t;
+
    if (ch < inputChannels) {
       t = 0;
       for (int f1y = 0; f1y < filterSize; f1y++){
          for (int f1x = 0; f1x < filterSize; f1x++) {
-            t += input[idx(ch, y + f1y, x + f1x, inputSize)] * filter1[idx(ch, f1y, f1x, filterSize)];
+            t += input[idx(ch, y + f1y, x + f1x, inputSize+2)] * filter1[idx(ch, f1y, f1x, filterSize)];
          }
       }
       buffer[ch] = t;
@@ -39,12 +61,14 @@ __global__ void depthwise_separable_convolution(
    if (ch < outputChannels) {
       t = 0;
       for (int inpCh = 0; inpCh < inputChannels; inpCh++) {
-         t += buffer[inpCh] * filter2[f_idx(inpCh, ch, inputChannels)];
+         t += buffer[ch] * filter2[f_idx(inpCh, ch, inputChannels)];
       }
       output[idx(ch, y, x, inputSize)] = ReLU(t);
    }   
 }
 
+
+__shared__ float tBuffer[];
 __global__ void depthwise_separable_convolution_toeplitz(
       int inputSize, int inputChannels,
       int outputChannels, const float* input, float* output, 
@@ -53,32 +77,24 @@ __global__ void depthwise_separable_convolution_toeplitz(
    const int x = blockIdx.x;
    const int y = blockIdx.y;
    const int ch = threadIdx.x;
-
    float t;
 
    if (ch < inputChannels) {
       int toeplitzRowIdx = y*inputSize + x;
-      int groupSizeX = inputSize+1;
-      int groupSizeY = inputSize+1 - filterSize + 1;
-      // int groupIdxY = toeplitzRowIdx / groupSizeY;
-      // int groupIdxX = groupIdxY;
-      int groupIdx = toeplitzRowIdx / groupSizeY;
+      // int groupSizeX = inputSize+2;
+      int groupSizeY = inputSize+2 - filterSize + 1;
+      int startGroupIdx = toeplitzRowIdx / groupSizeY;
       int zeroesLeft = toeplitzRowIdx % groupSizeY;
-      // int zeroesRight = groupSizeX - filterSize - zeroesLeft;  
 
       t = 0;
-      for (int curGroup = groupIdx, fRow = 0; fRow < filterSize; curGroup++, fRow++) {         
-         for (int j = 0; j < filterSize; j++) {
-            if (groupIdx == 0 && ch == 0) {
-            printf("curGroup %d;  fRow %d;  j %d;\t f=%d;  i=%d\n", curGroup, fRow, j, filter1[idx(ch, fRow, j, filterSize)], input[idx(ch, curGroup, j, inputSize+1)]);
-         }
-            t += filter1[idx(ch, fRow, j, filterSize)] * input[idx(ch, curGroup,  j, inputSize+1)]; // ?
+      for (int fRow = 0; fRow < filterSize; fRow++) {
+         int inpRow = startGroupIdx + fRow;
+         for (int fCol = 0; fCol < filterSize; fCol++) {            
+            int inpCol = zeroesLeft + fCol;
+            t += filter1[idx(ch, fRow, fCol, filterSize)] * input[idx(ch, inpRow, inpCol, inputSize+2)];
          }
       }
-      if (ch == 0 && groupIdx == 0) 
-         printf("ch=%d; x=%d; y=%d; grIdx=%d; tRow=%d;grSize=(%d, %d)\t%d\n\n", ch, x, y, groupIdx, 
-            toeplitzRowIdx, groupSizeX, groupSizeY, t);
-      buffer[ch] = t;
+      tBuffer[ch] = t;
    }   
 
    __syncthreads();
@@ -86,255 +102,363 @@ __global__ void depthwise_separable_convolution_toeplitz(
    if (ch < outputChannels) {
       t = 0;
       for (int inpCh = 0; inpCh < inputChannels; inpCh++) {
-         t += buffer[inpCh] * filter2[f_idx(inpCh, ch, inputChannels)];
+         t += tBuffer[ch] * filter2[f_idx(inpCh, ch, inputChannels)];
       }
       output[idx(ch, y, x, inputSize)] = ReLU(t);
    }   
 }
 
+
 bool check_error_status(cudaError_t status, const char *error_message) {
-    if (status != cudaSuccess) {
-        fprintf(stderr, error_message);
-        return true;
-    }
-    return false;
+   if (status != cudaSuccess) {
+      fprintf(stderr, error_message);
+      return true;
+   }
+   return false;
 }
 
-bool test(int inputSize, int inputChannels, int outputChannels, int filterSize) {
-   cudaError_t status;  
-   // printf("test start\n");
+bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
+      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2,
+      float &funcTime, float &memTime
+) {   
+   cudaError_t status; 
+   cudaEvent_t funcStart, funcStop, memStart, memStop;
+   cudaEventCreate(&funcStart); 
+   cudaEventCreate(&funcStop);
+   cudaEventCreate(&memStart);
+   cudaEventCreate(&memStop);
 
    status = cudaSetDevice(0);
-   if (check_error_status(status, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?\n"))
-      return false;
+   if (check_error_status(status, "cudaSetDevice fail\n")) return false;
 
-      
-   vector<float> hInput(inputChannels*inputSize*inputSize);
-   vector<float> hOutput(outputChannels*inputSize*inputSize);
-   vector<float> hFilter1(inputChannels*filterSize*filterSize);
-   vector<float> hFilter2(inputChannels*outputChannels);
-
-   for (int ch = 0; ch < inputChannels; ch++) {
-      for (int y = 0; y < inputSize; y++) {
-         for (int x = 0; x < inputSize; x++) {
-            hInput[idx(ch, y, x, inputSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
-         }
-      }
-   }
-   // printf("hInput +\n");
-   for (int ch = 0; ch < inputChannels; ch++) {
-      for (int y = 0; y < filterSize; y++) {
-         for (int x = 0; x < filterSize; x++) {
-            hFilter1[idx(ch, y, x, filterSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
-         }
-      }
-   }
-   // printf("hFilter1 +\n");
-   for (int oChannel = 0; oChannel < outputChannels; oChannel++) {
-      for (int iChannel = 0; iChannel < inputChannels; iChannel++) {
-         hFilter2[f_idx(iChannel, oChannel, inputChannels)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
-      }
-   }
-   // printf("host data initialized\n");
-   
-
+   cudaEventRecord(memStart);
    float *dInput, *dOutput, *dFilter1, *dFilter2;
-
    status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
    status = cudaMalloc((void**)&dOutput, hOutput.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
    status = cudaMalloc((void**)&dFilter1, hFilter1.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
    status = cudaMalloc((void**)&dFilter2, hFilter2.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
-
-   // printf("device data malloc success\n");
 
    status = cudaMemcpy(dInput, hInput.data(), hInput.size()*sizeof(float), cudaMemcpyHostToDevice);
-   if (check_error_status(status, "cudaMemCpy failed!\n"))
+   if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
    status = cudaMemcpy(dFilter1, hFilter1.data(), hFilter1.size()*sizeof(float), cudaMemcpyHostToDevice);
-   if (check_error_status(status, "cudaMemCpy failed!\n"))
+   if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
    status = cudaMemcpy(dFilter2, hFilter2.data(), hFilter2.size()*sizeof(float), cudaMemcpyHostToDevice);
-   if (check_error_status(status, "cudaMemCpy failed!\n"))
+   if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
 
-   // printf("device data memcpy success\n");
-
-   // int blockSizeX = inputSize;
-   // int blockSizeY = inputSize - filterSize + 1;
-   // vector<float> hToeplitz(inputChannels*blockSizeX*blockSizeX*blockSizeY*blockSizeY);
+   cudaEventRecord(memStop);
+   cudaEventSynchronize(memStop);
+   float temp;
+   cudaEventElapsedTime(&temp, memStart, memStop);
+   memTime += temp;
 
    dim3 dimBlock(max(inputChannels, outputChannels), 1);
    dim3 dimGrid(inputSize, inputSize);
-   // printf("foo started\n");
    depthwise_separable_convolution<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
       inputSize, inputChannels,
       outputChannels, dInput, dOutput, 
-      dFilter1, dFilter2, filterSize);
-   // printf("foo ended\n");
+      dFilter1, dFilter2, filterSize
+   );
 
+   cudaEventRecord(funcStop);
+   cudaEventSynchronize(funcStop);
+   cudaEventElapsedTime(&temp, funcStart, funcStop);
+   funcTime += temp;
+
+   cudaEventRecord(memStart);
    status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
    if (check_error_status(status, "couldn't load device output to host"))
       return false;
-   // printf("output copy success\n");
+   cudaEventRecord(memStop);
+   cudaEventSynchronize(memStop);
+   cudaEventElapsedTime(&temp, memStart, memStop);
+   memTime += temp;
 
    cudaFree(dInput);
    cudaFree(dOutput);
    cudaFree(dFilter1);
    cudaFree(dFilter2);
+   cudaEventDestroy(funcStart);
+   cudaEventDestroy(funcStop);
+   cudaEventDestroy(memStart);
+   cudaEventDestroy(memStop);
+   return true;
+}
 
+bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int filterSize,
+      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2,
+      float &funcTime, float &memTime
+) {
+   cudaError_t status;
+   cudaEvent_t funcStart, funcStop, memStart, memStop;
+   cudaEventCreate(&funcStart); 
+   cudaEventCreate(&funcStop);
+   cudaEventCreate(&memStart);
+   cudaEventCreate(&memStop);
+
+   
+
+   status = cudaSetDevice(0);
+   if (check_error_status(status, "cudaSetDevice fail\n")) return false;
+
+   cudaEventRecord(memStart);
+   float *dInput, *dOutput, *dFilter1, *dFilter2;
+   status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMalloc((void**)&dOutput, hOutput.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMalloc((void**)&dFilter1, hFilter1.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMalloc((void**)&dFilter2, hFilter2.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+
+   status = cudaMemcpy(dInput, hInput.data(), hInput.size()*sizeof(float), cudaMemcpyHostToDevice);
+   if (check_error_status(status, "cudaMemCpy fail\n"))
+      return false;
+   status = cudaMemcpy(dFilter1, hFilter1.data(), hFilter1.size()*sizeof(float), cudaMemcpyHostToDevice);
+   if (check_error_status(status, "cudaMemCpy fail\n"))
+      return false;
+   status = cudaMemcpy(dFilter2, hFilter2.data(), hFilter2.size()*sizeof(float), cudaMemcpyHostToDevice);
+   if (check_error_status(status, "cudaMemCpy fail\n"))
+      return false;
+   
+   cudaEventRecord(memStop);
+   cudaEventSynchronize(memStop);
+   float temp;
+   cudaEventElapsedTime(&temp, memStart, memStop);
+   memTime += temp;
+
+   cudaEventRecord(funcStart);
+   dim3 dimBlock(max(inputChannels, outputChannels), 1);
+   dim3 dimGrid(inputSize, inputSize);
+   depthwise_separable_convolution_toeplitz<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
+      inputSize, inputChannels,
+      outputChannels, dInput, dOutput, 
+      dFilter1, dFilter2, filterSize
+   );
+
+   cudaEventRecord(funcStop);
+   cudaEventSynchronize(funcStop);
+   cudaEventElapsedTime(&temp, funcStart, funcStop);
+   funcTime += temp;
+
+   cudaEventRecord(memStart);
+   status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
+   if (check_error_status(status, "couldn't load device output to host"))
+      return false;
+   cudaEventRecord(memStop);
+   cudaEventSynchronize(memStop);
+   cudaEventElapsedTime(&temp, memStart, memStop);
+   memTime += temp;
+
+   cudaFree(dInput);
+   cudaFree(dOutput);
+   cudaFree(dFilter1);
+   cudaFree(dFilter2);
+   cudaEventDestroy(funcStart);
+   cudaEventDestroy(funcStop);
+   cudaEventDestroy(memStart);
+   cudaEventDestroy(memStop);
    return true;
 }
 
 
-void print_vector2d(vector<float> vec, int size, int channel) {
-   printf("Channel %d\n", channel);
-   for (int y = 0; y < size; y++) {
-      for (int x = 0; x < size; x++) {
-         printf("%f ", vec[idx(channel, y, x, size)]);
-      }
-      printf("\n");
+bool fillInput(vector<float> &inp, int channelNum, int inpSize) {
+   if (inp.size() < channelNum*(inpSize+2)*(inpSize+2)){
+      printf("Couldn't fill input vector\n");
+      return false;
    }
+   for (int ch = 0; ch < channelNum; ch++) {
+      for (int y = 0; y < inpSize+2; y++)
+         for (int x = 0; x < inpSize+2; x++)
+            inp[idx(ch, y, x, inpSize+2)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+      for (int x = 0, y = 0; x < inpSize+2; x++)
+         inp[idx(ch, y, x, inpSize+2)] = 0;
+      for (int x = 0, y = inpSize+1; x < inpSize+2; x++)
+         inp[idx(ch, y, x, inpSize+2)] = 0;   
+
+      for (int x = 0, y = 0; y < inpSize+2; y++)
+         inp[idx(ch, y, x, inpSize+2)] = 0;
+      for (int x = inpSize+1, y = 0; y < inpSize+2; y++)
+         inp[idx(ch, y, x, inpSize+2)] = 0;   
+   }  
+   return true;
 }
 
-bool static_test() {
-   int inputChannels = 2, outputChannels = 2;
-   int inputSize = 3, filterSize = 2;
-   cudaError_t status;  
+bool fillFilter1(vector<float> &f, int channelNum, int dimSize) {
+   if (f.size() < channelNum*dimSize*dimSize) {
+      printf("Couldn't fill filter 1\n");
+      return false;
+   }
+   for (int ch = 0; ch < channelNum; ch++) {
+      for (int y = 0; y < dimSize; y++)
+         for (int x = 0; x < dimSize; x++)
+            f[idx(ch, y, x, dimSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+   }
+   return true;   
+}
+
+bool fillFilter2(vector<float> &f, int inputChannels, int outputChannels) {
+   if (f.size() < inputChannels*outputChannels) {
+      printf("Couldn't fill filter 2\n");
+      return false;
+   }
+   for (int oChannel = 0; oChannel < outputChannels; oChannel++)
+      for (int iChannel = 0; iChannel < inputChannels; iChannel++)
+         f[f_idx(iChannel, oChannel, inputChannels)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+   return true;
+}
+
+
+bool mini_test() {
+   const int inputSize = 4;
+	const int inputChannels = 2;
+	const int outputChannels = 2;
+	const int filterSize = 3;
+   cudaError_t status; 
+   printf("Mini test:\n"); 
 
    status = cudaSetDevice(0);
-   if (check_error_status(status, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?\n"))
-      return false;
+   if (check_error_status(status, "cudaSetDevice fail\n")) return false;
       
-   vector<float> hInput(inputChannels*(inputSize+1)*(inputSize+1));
+   vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
    vector<float> hOutput(outputChannels*inputSize*inputSize);
    vector<float> hFilter1(inputChannels*filterSize*filterSize);
    vector<float> hFilter2(inputChannels*outputChannels);
-
-   for (int ch = 0; ch < inputChannels; ch++) {
-      for (int y = 0; y < inputSize; y++) {
-         for (int x = 0; x < inputSize; x++) {
-            hInput[idx(ch, y, x, inputSize+1)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
-         }
-      }
-   }
-   printf("hInput+\n");
-   for (int ch = 0; ch < inputChannels; ch++) {
-      for (int x = 0, y = inputSize; x < inputSize+1; x++) {
-         hInput[idx(ch, y, x, inputSize+1)] = 0;         
-      }
-      for (int x = inputSize, y = 0; y < inputSize+1; y++) {
-         hInput[idx(ch, y, x, inputSize+1)] = 0;         
-      }
-   }
-   printf("padding+\n");
+   fillInput(hInput, inputChannels, inputSize);
    printf("Input:\n");
-   for (int ch = 0; ch < inputChannels; ch++) {
-      print_vector2d(hInput, inputSize+1, ch);
-   }
-   // printf("hInput +\n");
-   for (int ch = 0; ch < inputChannels; ch++) {
-      for (int y = 0; y < filterSize; y++) {
-         for (int x = 0; x < filterSize; x++) {
-            hFilter1[idx(ch, y, x, filterSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
-         }
-      }
-   }
+   printVector2d(hInput, inputSize+2, 0);
+   // printVector2d(hInput, inputSize+2, 1);
+
+   fillFilter1(hFilter1, inputChannels, filterSize);
    printf("Filter 1:\n");
-   for (int ch = 0; ch < inputChannels; ch++) {
-      print_vector2d(hFilter1, filterSize, ch);
-   }
-   // printf("hFilter1 +\n");
-   for (int oChannel = 0; oChannel < outputChannels; oChannel++) {
-      for (int iChannel = 0; iChannel < inputChannels; iChannel++) {
-         hFilter2[f_idx(iChannel, oChannel, inputChannels)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
-      }
-   }
-   // printf("host data initialized\n");
-   
+   printVector2d(hFilter1, filterSize, 0);
+   // printVector2d(hFilter1, filterSize, 1);
+
+   fillFilter2(hFilter2, inputChannels, outputChannels);
+   printFilter2(hFilter2, inputChannels, outputChannels);
 
    float *dInput, *dOutput, *dFilter1, *dFilter2;
-
    status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
    status = cudaMalloc((void**)&dOutput, hOutput.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
    status = cudaMalloc((void**)&dFilter1, hFilter1.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
    status = cudaMalloc((void**)&dFilter2, hFilter2.size()*sizeof(float));
-   if (check_error_status(status, "cudaMalloc failed!\n"))
+   if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
-
-   // printf("device data malloc success\n");
+   // printf("cuda malloc done\n");
 
    status = cudaMemcpy(dInput, hInput.data(), hInput.size()*sizeof(float), cudaMemcpyHostToDevice);
-   if (check_error_status(status, "cudaMemCpy failed!\n"))
+   if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
    status = cudaMemcpy(dFilter1, hFilter1.data(), hFilter1.size()*sizeof(float), cudaMemcpyHostToDevice);
-   if (check_error_status(status, "cudaMemCpy failed!\n"))
+   if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
    status = cudaMemcpy(dFilter2, hFilter2.data(), hFilter2.size()*sizeof(float), cudaMemcpyHostToDevice);
-   if (check_error_status(status, "cudaMemCpy failed!\n"))
+   if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
-
-   // printf("device data memcpy success\n");
-
-   // int blockSizeX = inputSize;
-   // int blockSizeY = inputSize - filterSize + 1;
-   // vector<float> hToeplitz(inputChannels*blockSizeX*blockSizeX*blockSizeY*blockSizeY);
+   // printf("cuda memcpy done\n");
 
    dim3 dimBlock(max(inputChannels, outputChannels), 1);
    dim3 dimGrid(inputSize, inputSize);
-   // printf("foo started\n");
-   depthwise_separable_convolution_toeplitz<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
+   // printf("func started\n");
+   depthwise_separable_convolution<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
       inputSize, inputChannels,
       outputChannels, dInput, dOutput, 
-      dFilter1, dFilter2, filterSize);
-   // printf("foo ended\n");
+      dFilter1, dFilter2, filterSize
+   );
+   // printf("func ended\n");
 
    status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
    if (check_error_status(status, "couldn't load device output to host"))
       return false;
+   printf("Output standard:\n");
+   printVector2d(hOutput, inputSize, 0);
+   // printVector2d(hOutput, inputSize, 1);
 
-   printf("Output:\n");
-   for (int ch = 0; ch < outputChannels; ch++) {
-      print_vector2d(hOutput, inputSize, ch);
-   }
-   // printf("output copy success\n");
+   // printf("toeplitz started\n");
+   depthwise_separable_convolution_toeplitz<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
+      inputSize, inputChannels,
+      outputChannels, dInput, dOutput, 
+      dFilter1, dFilter2, filterSize
+   );
+   // printf("toeplitz ended\n");
+
+   status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
+   if (check_error_status(status, "couldn't load device output to host"))
+      return false;
+   printf("Output toeplitz:\n");
+   printVector2d(hOutput, inputSize, 0);
+   // printVector2d(hOutput, inputSize, 1);
 
    cudaFree(dInput);
    cudaFree(dOutput);
    cudaFree(dFilter1);
    cudaFree(dFilter2);
-
    return true;
 }
 
 int main() {
-   int inputSize = 1 << 10;
-	int inputChannels = 3;
-	int outputChannels = 16;
-	int filterSize = 3;
+	const int inputChannels = 3;
+	const int outputChannelsArr[]{3, 8, 16, 32, 64, 128, 256};
+	const int filterSize = 3;
+   // mini_test();   
+   const int testNum = 10;
+   const int inputSizeMax = 1 << 10;
+   ofstream res("test_res.txt");   
+   res << "test num:" << testNum << endl;
 
-   static_test();
+   for (int outputChannels : outputChannelsArr) {
+      for (int inputSize = 256; inputSize <= inputSizeMax; inputSize <<= 1) {
+         vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
+         vector<float> hOutput(outputChannels*inputSize*inputSize);
+         vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+         vector<float> hFilter1(inputChannels*filterSize*filterSize);
+         vector<float> hFilter2(inputChannels*outputChannels);
 
-   // int testNum = 1;   
-   // for (int i = 0; i < testNum; i++) {
-   //    bool res = test(inputSize, inputChannels, outputChannels, filterSize);
-   //    if (res == false) {
-   //       printf("%d. test fail\n", i);
-   //       return -1;
-   //    }
-   //    printf("%d. test success\n", i);
-   // }   
+         res << "input:output(size*size) " << inputChannels << ":" << outputChannels << "(" 
+            << inputSize << "*" << inputSize << ")" << endl;
+         printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
+         
+
+         float funcTime = 0, memTime = 0;
+         for (int i = 1; i <= testNum; i++) {
+            fillInput(hInput, inputChannels, inputSize);
+            fillFilter1(hFilter1, inputChannels, filterSize);
+            fillFilter2(hFilter2, inputChannels, outputChannels);
+            test(inputSize, inputChannels, outputChannels, filterSize,
+               hInput, hOutput, hFilter1, hFilter2, 
+               funcTime, memTime); 
+            // test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
+            //    hInput, hOutput, hFilter1, hFilter2, 
+            //    funcTime, memTime);
+            printf("%d.pass  ", i);
+            if (i% 10 == 0)
+               printf("\n");
+         }
+         res << "   function: " << funcTime << "ms; " << "memory: " << memTime << "ms" << endl;
+         res << "   function avg: " << funcTime / testNum << "ms; " << "memory avg: " << memTime / testNum << "ms" << endl; 
+      }  
+      res << endl;
+   }
+   res.close();
 }
