@@ -5,14 +5,13 @@
 #include "device_launch_parameters.h"
 
 using namespace std;
-
-#define idx(c, x, y, C, X, Y) ((x) + (X) * ((y) + (Y) * (c)))
+// #define idx(c, x, y, C, X, Y) ((x) + (X) * ((y) + (Y) * (c)))
 // #define f_idx(a, c, x, y, A, C, X, Y) ((x) + (X) * ((y) + (Y) * ((c) + (C) * (a))))
-#define f_idx(inpCh, outCh, InpCh) ((inpCh) + (InpCh*outCh))
+
 #define ReLU(v) (max((v), 0.0f))
 
-#define idx2(ch, row, col, size) ((ch)*(size)*(size) + (row)*(size) + col)
-
+#define idx(ch, row, col, size) ((ch)*(size)*(size) + (row)*(size) + col)
+#define f_idx(inpCh, outCh, InpCh) ((inpCh) + (InpCh*outCh))
 
 __shared__ float buffer[];
 __global__ void depthwise_separable_convolution(
@@ -20,27 +19,30 @@ __global__ void depthwise_separable_convolution(
       int outputChannels, const float* input, float* output, 
       const float* filter1, const float* filter2, int filterSize
 ) {
-   const int n2y = blockIdx.x;
-   const int n2x = blockIdx.y;
+   const int x = blockIdx.x;
+   const int y = blockIdx.y;
    const int ch = threadIdx.x;
 
-   if (ch > inputChannels) return;
-   float t = 0;
-   for (int f1y = 0; f1y < filterSize; f1y++){
-      for (int f1x = 0; f1x < filterSize; f1x++) {
-         t += input[idx(ch, n2x + f1x, n2y + f1y, inputChannels, inputSize, inputSize)] * filter1[idx(ch, f1x, f1y, inputChannels, filterSize, filterSize)];
+   float t;
+   if (ch < inputChannels) {
+      t = 0;
+      for (int f1y = 0; f1y < filterSize; f1y++){
+         for (int f1x = 0; f1x < filterSize; f1x++) {
+            t += input[idx(ch, y + f1y, x + f1x, inputSize)] * filter1[idx(ch, f1y, f1x, filterSize)];
+         }
       }
-   }
-   buffer[ch] = t;
+      buffer[ch] = t;
+   }   
 
    __syncthreads();
 
-   if (ch >= outputChannels) return;
-   t = 0;
-   for (int ch2 = 0; ch2 < inputChannels; ch2++) {
-      t += buffer[ch2] * filter2[f_idx(ch, ch2, inputChannels)];
-   }
-   output[idx(ch, n2x, n2y, outputChannels, inputSize, inputSize)] = ReLU(t);
+   if (ch < outputChannels) {
+      t = 0;
+      for (int inpCh = 0; inpCh < inputChannels; inpCh++) {
+         t += buffer[inpCh] * filter2[f_idx(inpCh, ch, inputChannels)];
+      }
+      output[idx(ch, y, x, inputSize)] = ReLU(t);
+   }   
 }
 
 __global__ void depthwise_separable_convolution_toeplitz(
@@ -48,49 +50,46 @@ __global__ void depthwise_separable_convolution_toeplitz(
       int outputChannels, const float* input, float* output, 
       const float* filter1, const float* filter2, int filterSize
 ) {
-   const int n2y = blockIdx.x;
-   const int n2x = blockIdx.y;
+   const int x = blockIdx.x;
+   const int y = blockIdx.y;
    const int ch = threadIdx.x;
 
-   if (ch > inputChannels) return;
-   int toeplitzRowIdx = n2y*inputSize + n2x;
-   int groupSizeX = inputSize+1;
-   int groupSizeY = inputSize+1 - filterSize + 1;
-   // int groupIdxY = toeplitzRowIdx / groupSizeY;
-   // int groupIdxX = groupIdxY;
-   int groupIdx = toeplitzRowIdx / groupSizeY;
-   int zeroesLeft = toeplitzRowIdx % groupSizeY;
-   // int zeroesRight = groupSizeX - filterSize - zeroesLeft;  
+   float t;
 
-   float t = 0;
-   for (int curGroup = groupIdx, fRow = 0; fRow < filterSize; curGroup++, fRow++) {
-      
-      for (int j = 0; j < filterSize; j++) {
-         if (groupIdx == 0 && ch == 0) {
-         printf("curGroup %d;  fRow %d;  j %d;\t f=%d;  i=%d\n", curGroup, fRow, j, filter1[idx2(ch, fRow, j, filterSize)], input[idx2(ch, curGroup, j, inputSize+1)]);
+   if (ch < inputChannels) {
+      int toeplitzRowIdx = y*inputSize + x;
+      int groupSizeX = inputSize+1;
+      int groupSizeY = inputSize+1 - filterSize + 1;
+      // int groupIdxY = toeplitzRowIdx / groupSizeY;
+      // int groupIdxX = groupIdxY;
+      int groupIdx = toeplitzRowIdx / groupSizeY;
+      int zeroesLeft = toeplitzRowIdx % groupSizeY;
+      // int zeroesRight = groupSizeX - filterSize - zeroesLeft;  
+
+      t = 0;
+      for (int curGroup = groupIdx, fRow = 0; fRow < filterSize; curGroup++, fRow++) {         
+         for (int j = 0; j < filterSize; j++) {
+            if (groupIdx == 0 && ch == 0) {
+            printf("curGroup %d;  fRow %d;  j %d;\t f=%d;  i=%d\n", curGroup, fRow, j, filter1[idx(ch, fRow, j, filterSize)], input[idx(ch, curGroup, j, inputSize+1)]);
+         }
+            t += filter1[idx(ch, fRow, j, filterSize)] * input[idx(ch, curGroup,  j, inputSize+1)]; // ?
+         }
       }
-         t += filter1[idx2(ch, fRow, j, filterSize)] * input[idx2(ch, curGroup,  j, inputSize+1)]; // ?
-      }
-   }
-   // for (int i = groupIdx*groupSizeX + zeroesLeft, curGroup = groupIdx; i < inputSize; i += groupSizeX, curGroup++) {
-   //    for (int j = 0; j < filterSize; j++) {
-   //       int inpIdx = ch*inputSize*inputSize + curGroup*inputSize + j;
-   //       t += filter1[idx2(ch, curGroup, j, filterSize)] * input[toeplitzRowIdx]; // ?
-   //    }
-   // }
-   if (ch == 0 && groupIdx == 0) 
-      printf("ch=%d; n2y=%d; n2x=%d; grIdx=%d; tRow=%d;grSize=(%d, %d)\t%d\n\n", ch, n2y, n2x, groupIdx, 
-         toeplitzRowIdx, groupSizeX, groupSizeY, t);
-   buffer[ch] = t;
+      if (ch == 0 && groupIdx == 0) 
+         printf("ch=%d; x=%d; y=%d; grIdx=%d; tRow=%d;grSize=(%d, %d)\t%d\n\n", ch, x, y, groupIdx, 
+            toeplitzRowIdx, groupSizeX, groupSizeY, t);
+      buffer[ch] = t;
+   }   
 
    __syncthreads();
 
-   if (ch >= outputChannels) return;
-   t = 0;
-   for (int ch2 = 0; ch2 < inputChannels; ch2++) {
-      t += buffer[ch2] * filter2[f_idx(ch, ch2, inputChannels)];
-   }
-   output[idx(ch, n2x, n2y, outputChannels, inputSize, inputSize)] = ReLU(t);
+   if (ch < outputChannels) {
+      t = 0;
+      for (int inpCh = 0; inpCh < inputChannels; inpCh++) {
+         t += buffer[inpCh] * filter2[f_idx(inpCh, ch, inputChannels)];
+      }
+      output[idx(ch, y, x, inputSize)] = ReLU(t);
+   }   
 }
 
 bool check_error_status(cudaError_t status, const char *error_message) {
@@ -118,7 +117,7 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize) 
    for (int ch = 0; ch < inputChannels; ch++) {
       for (int y = 0; y < inputSize; y++) {
          for (int x = 0; x < inputSize; x++) {
-            hInput[idx(ch, x, y, inputChannels, inputSize, inputSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+            hInput[idx(ch, y, x, inputSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
          }
       }
    }
@@ -126,7 +125,7 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize) 
    for (int ch = 0; ch < inputChannels; ch++) {
       for (int y = 0; y < filterSize; y++) {
          for (int x = 0; x < filterSize; x++) {
-            hFilter1[idx(ch, x, y, inputChannels, filterSize, filterSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+            hFilter1[idx(ch, y, x, filterSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
          }
       }
    }
@@ -199,7 +198,7 @@ void print_vector2d(vector<float> vec, int size, int channel) {
    printf("Channel %d\n", channel);
    for (int y = 0; y < size; y++) {
       for (int x = 0; x < size; x++) {
-         printf("%f ", vec[idx2(channel, y, x, size)]);
+         printf("%f ", vec[idx(channel, y, x, size)]);
       }
       printf("\n");
    }
@@ -222,17 +221,17 @@ bool static_test() {
    for (int ch = 0; ch < inputChannels; ch++) {
       for (int y = 0; y < inputSize; y++) {
          for (int x = 0; x < inputSize; x++) {
-            hInput[idx2(ch, y, x, inputSize+1)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+            hInput[idx(ch, y, x, inputSize+1)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
          }
       }
    }
    printf("hInput+\n");
    for (int ch = 0; ch < inputChannels; ch++) {
       for (int x = 0, y = inputSize; x < inputSize+1; x++) {
-         hInput[idx2(ch, y, x, inputSize+1)] = 0;         
+         hInput[idx(ch, y, x, inputSize+1)] = 0;         
       }
       for (int x = inputSize, y = 0; y < inputSize+1; y++) {
-         hInput[idx2(ch, y, x, inputSize+1)] = 0;         
+         hInput[idx(ch, y, x, inputSize+1)] = 0;         
       }
    }
    printf("padding+\n");
@@ -244,7 +243,7 @@ bool static_test() {
    for (int ch = 0; ch < inputChannels; ch++) {
       for (int y = 0; y < filterSize; y++) {
          for (int x = 0; x < filterSize; x++) {
-            hFilter1[idx(ch, x, y, inputChannels, filterSize, filterSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
+            hFilter1[idx(ch, y, x, filterSize)] = rand() % 3 + 1.0 / (1.0 + rand() % 3);
          }
       }
    }
@@ -329,13 +328,13 @@ int main() {
 
    static_test();
 
-   // int testNum = 1000;   
+   // int testNum = 1;   
    // for (int i = 0; i < testNum; i++) {
    //    bool res = test(inputSize, inputChannels, outputChannels, filterSize);
    //    if (res == false) {
-   //       printf("%d test fail\n", i);
+   //       printf("%d. test fail\n", i);
    //       return -1;
    //    }
-   //    printf("%d test success\n", i);
+   //    printf("%d. test success\n", i);
    // }   
 }
