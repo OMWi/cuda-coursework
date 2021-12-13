@@ -118,20 +118,20 @@ bool check_error_status(cudaError_t status, const char *error_message) {
 }
 
 bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
-      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2,
-      float &funcTime, float &memTime
+      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2
+      // , float &funcTime, float &memTime
 ) {   
    cudaError_t status; 
-   cudaEvent_t funcStart, funcStop, memStart, memStop;
-   cudaEventCreate(&funcStart); 
-   cudaEventCreate(&funcStop);
-   cudaEventCreate(&memStart);
-   cudaEventCreate(&memStop);
+   // cudaEvent_t funcStart, funcStop, memStart, memStop;
+   // cudaEventCreate(&funcStart); 
+   // cudaEventCreate(&funcStop);
+   // cudaEventCreate(&memStart);
+   // cudaEventCreate(&memStop);
 
    status = cudaSetDevice(0);
    if (check_error_status(status, "cudaSetDevice fail\n")) return false;
 
-   cudaEventRecord(memStart);
+   // cudaEventRecord(memStart);
    float *dInput, *dOutput, *dFilter1, *dFilter2;
    status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
    if (check_error_status(status, "cudaMalloc fail\n"))
@@ -156,11 +156,11 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
    if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
 
-   cudaEventRecord(memStop);
-   cudaEventSynchronize(memStop);
-   float temp;
-   cudaEventElapsedTime(&temp, memStart, memStop);
-   memTime += temp;
+   // cudaEventRecord(memStop);
+   // cudaEventSynchronize(memStop);
+   // float temp;
+   // cudaEventElapsedTime(&temp, memStart, memStop);
+   // memTime += temp;
 
    dim3 dimBlock(max(inputChannels, outputChannels), 1);
    dim3 dimGrid(inputSize, inputSize);
@@ -170,48 +170,48 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
       dFilter1, dFilter2, filterSize
    );
 
-   cudaEventRecord(funcStop);
-   cudaEventSynchronize(funcStop);
-   cudaEventElapsedTime(&temp, funcStart, funcStop);
-   funcTime += temp;
+   // cudaEventRecord(funcStop);
+   // cudaEventSynchronize(funcStop);
+   // cudaEventElapsedTime(&temp, funcStart, funcStop);
+   // funcTime += temp;
 
-   cudaEventRecord(memStart);
+   // cudaEventRecord(memStart);
    status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
    if (check_error_status(status, "couldn't load device output to host"))
       return false;
-   cudaEventRecord(memStop);
-   cudaEventSynchronize(memStop);
-   cudaEventElapsedTime(&temp, memStart, memStop);
-   memTime += temp;
+   // cudaEventRecord(memStop);
+   // cudaEventSynchronize(memStop);
+   // cudaEventElapsedTime(&temp, memStart, memStop);
+   // memTime += temp;
 
    cudaFree(dInput);
    cudaFree(dOutput);
    cudaFree(dFilter1);
    cudaFree(dFilter2);
-   cudaEventDestroy(funcStart);
-   cudaEventDestroy(funcStop);
-   cudaEventDestroy(memStart);
-   cudaEventDestroy(memStop);
+   // cudaEventDestroy(funcStart);
+   // cudaEventDestroy(funcStop);
+   // cudaEventDestroy(memStart);
+   // cudaEventDestroy(memStop);
    return true;
 }
 
 bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int filterSize,
-      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2,
-      float &funcTime, float &memTime
+      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2
+      // , float &funcTime, float &memTime
 ) {
    cudaError_t status;
-   cudaEvent_t funcStart, funcStop, memStart, memStop;
-   cudaEventCreate(&funcStart); 
-   cudaEventCreate(&funcStop);
-   cudaEventCreate(&memStart);
-   cudaEventCreate(&memStop);
+   // cudaEvent_t funcStart, funcStop, memStart, memStop;
+   // cudaEventCreate(&funcStart); 
+   // cudaEventCreate(&funcStop);
+   // cudaEventCreate(&memStart);
+   // cudaEventCreate(&memStop);
 
    
 
    status = cudaSetDevice(0);
    if (check_error_status(status, "cudaSetDevice fail\n")) return false;
 
-   cudaEventRecord(memStart);
+   // cudaEventRecord(memStart);
    float *dInput, *dOutput, *dFilter1, *dFilter2;
    status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
    if (check_error_status(status, "cudaMalloc fail\n"))
@@ -236,13 +236,13 @@ bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int fil
    if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
    
-   cudaEventRecord(memStop);
-   cudaEventSynchronize(memStop);
-   float temp;
-   cudaEventElapsedTime(&temp, memStart, memStop);
-   memTime += temp;
+   // cudaEventRecord(memStop);
+   // cudaEventSynchronize(memStop);
+   // float temp;
+   // cudaEventElapsedTime(&temp, memStart, memStop);
+   // memTime += temp;
 
-   cudaEventRecord(funcStart);
+   // cudaEventRecord(funcStart);
    dim3 dimBlock(max(inputChannels, outputChannels), 1);
    dim3 dimGrid(inputSize, inputSize);
    depthwise_separable_convolution_toeplitz<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
@@ -251,28 +251,28 @@ bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int fil
       dFilter1, dFilter2, filterSize
    );
 
-   cudaEventRecord(funcStop);
-   cudaEventSynchronize(funcStop);
-   cudaEventElapsedTime(&temp, funcStart, funcStop);
-   funcTime += temp;
+   // cudaEventRecord(funcStop);
+   // cudaEventSynchronize(funcStop);
+   // cudaEventElapsedTime(&temp, funcStart, funcStop);
+   // funcTime += temp;
 
-   cudaEventRecord(memStart);
+   // cudaEventRecord(memStart);
    status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
    if (check_error_status(status, "couldn't load device output to host"))
       return false;
-   cudaEventRecord(memStop);
-   cudaEventSynchronize(memStop);
-   cudaEventElapsedTime(&temp, memStart, memStop);
-   memTime += temp;
+   // cudaEventRecord(memStop);
+   // cudaEventSynchronize(memStop);
+   // cudaEventElapsedTime(&temp, memStart, memStop);
+   // memTime += temp;
 
    cudaFree(dInput);
    cudaFree(dOutput);
    cudaFree(dFilter1);
    cudaFree(dFilter2);
-   cudaEventDestroy(funcStart);
-   cudaEventDestroy(funcStop);
-   cudaEventDestroy(memStart);
-   cudaEventDestroy(memStop);
+   // cudaEventDestroy(funcStart);
+   // cudaEventDestroy(funcStop);
+   // cudaEventDestroy(memStart);
+   // cudaEventDestroy(memStop);
    return true;
 }
 
@@ -417,8 +417,8 @@ bool mini_test() {
    return true;
 }
 
-int main() {
-	const int inputChannels = 3;
+void test1() {
+   const int inputChannels = 3;
 	const int outputChannelsArr[]{3, 8, 16, 32, 64, 128, 256};
 	const int filterSize = 3;
    // mini_test();   
@@ -449,7 +449,7 @@ int main() {
                hInput, hOutput, hFilter1, hFilter2, 
                funcTime, memTime); 
             // test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
-            //    hInput, hOutput, hFilter1, hFilter2, 
+            //    hInput, hOutputToeplitz, hFilter1, hFilter2, 
             //    funcTime, memTime);
             printf("%d.pass  ", i);
             if (i% 10 == 0)
@@ -461,4 +461,46 @@ int main() {
       res << endl;
    }
    res.close();
+}
+
+void test2() {
+   const int inputChannels = 3;
+   const int outputChannels = 16;
+   const int inputSize = 256;
+   const int filterSize = 3;
+   const int testNum = 100;
+
+   vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
+   vector<float> hOutput(outputChannels*inputSize*inputSize);
+   vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+   vector<float> hFilter1(inputChannels*filterSize*filterSize);
+   vector<float> hFilter2(inputChannels*outputChannels);
+
+
+   for (int i = 1; i <= testNum; i++) {
+      test(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutput, hFilter1, hFilter2
+      );
+      test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutputToeplitz, hFilter1, hFilter2
+      );
+      int size = hOutput.size();
+      for (int idx = 0; idx < size; idx++) {
+         if (hOutput[idx] != hOutputToeplitz[idx]) {
+            printf("%d. fail\n", i);
+            printf("Standart output: %f;  Toeplitz output:%f;\n", hOutput[idx], hOutputToeplitz[idx]);
+            printf("idx=%d", idx);
+         }
+      }
+
+      printf("%d. pass  ", i);
+      if (i % 10 == 0) {
+         printf("\n");
+      }
+   }
+}
+
+int main() {
+	// test1();
+   test2();
 }
