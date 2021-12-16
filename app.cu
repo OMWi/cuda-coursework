@@ -3,15 +3,10 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
-// #include "cuda_runtime.h"
-// #include "device_launch_parameters.h"
 
 using namespace std;
 
-// #define f_idx(a, c, x, y, A, C, X, Y) ((x) + (X) * ((y) + (Y) * ((c) + (C) * (a))))
-
 #define ReLU(v) (max((v), 0.0f))
-
 #define idx(ch, row, col, size) ((ch)*(size)*(size) + (row)*(size) + col)
 #define f_idx(inpCh, outCh, InpCh) ((inpCh) + (InpCh*outCh))
 
@@ -68,7 +63,7 @@ __global__ void depthwise_separable_convolution(
 }
 
 
-__shared__ float tBuffer[];
+__shared__ float bufferToeplitz[];
 __global__ void depthwise_separable_convolution_toeplitz(
       int inputSize, int inputChannels,
       int outputChannels, const float* input, float* output, 
@@ -94,7 +89,7 @@ __global__ void depthwise_separable_convolution_toeplitz(
             t += filter1[idx(ch, fRow, fCol, filterSize)] * input[idx(ch, inpRow, zeroesLeft + fCol, inputSize+2)];
          }
       }
-      tBuffer[ch] = t;
+      bufferToeplitz[ch] = t;
    }   
 
    __syncthreads();
@@ -102,10 +97,34 @@ __global__ void depthwise_separable_convolution_toeplitz(
    if (ch < outputChannels) {
       t = 0;
       for (int inpCh = 0; inpCh < inputChannels; inpCh++) {
-         t += tBuffer[ch] * filter2[f_idx(inpCh, ch, inputChannels)];
+         t += bufferToeplitz[ch] * filter2[f_idx(inpCh, ch, inputChannels)];
       }
       output[idx(ch, y, x, inputSize)] = ReLU(t);
    }   
+}
+
+__shared__ float bufferNoSync[];
+__global__ void depthwise_separable_convolution_nosync(
+      int inputSize, int inputChannels,
+      int outputChannels, const float* input, float* output, 
+      const float* filter1, const float* filter2, int filterSize
+) {
+   const int x = blockIdx.x;
+   const int y = blockIdx.y;
+   const int outCh = threadIdx.x;
+
+   float t = 0;
+
+   for (int inpCh = 0; inpCh < inputChannels; inpCh++) {
+      float temp = 0;
+      for (int f1y = 0; f1y < filterSize; f1y++){
+         for (int f1x = 0; f1x < filterSize; f1x++) {
+            temp += input[idx(inpCh, y + f1y, x + f1x, inputSize+2)] * filter1[idx(inpCh, f1y, f1x, filterSize)];
+         }
+      }
+      t += temp * filter2[f_idx(inpCh, outCh, inputChannels)];
+   }
+   output[idx(outCh, y, x, inputSize)] = ReLU(t);
 }
 
 
@@ -119,19 +138,10 @@ bool check_error_status(cudaError_t status, const char *error_message) {
 
 bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
       vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2
-      // , float &funcTime, float &memTime
 ) {   
-   cudaError_t status; 
-   // cudaEvent_t funcStart, funcStop, memStart, memStop;
-   // cudaEventCreate(&funcStart); 
-   // cudaEventCreate(&funcStop);
-   // cudaEventCreate(&memStart);
-   // cudaEventCreate(&memStop);
-
+   cudaError_t status;
    status = cudaSetDevice(0);
    if (check_error_status(status, "cudaSetDevice fail\n")) return false;
-
-   // cudaEventRecord(memStart);
    float *dInput, *dOutput, *dFilter1, *dFilter2;
    status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
    if (check_error_status(status, "cudaMalloc fail\n"))
@@ -145,7 +155,6 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
    status = cudaMalloc((void**)&dFilter2, hFilter2.size()*sizeof(float));
    if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
-
    status = cudaMemcpy(dInput, hInput.data(), hInput.size()*sizeof(float), cudaMemcpyHostToDevice);
    if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
@@ -155,12 +164,6 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
    status = cudaMemcpy(dFilter2, hFilter2.data(), hFilter2.size()*sizeof(float), cudaMemcpyHostToDevice);
    if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
-
-   // cudaEventRecord(memStop);
-   // cudaEventSynchronize(memStop);
-   // float temp;
-   // cudaEventElapsedTime(&temp, memStart, memStop);
-   // memTime += temp;
 
    dim3 dimBlock(max(inputChannels, outputChannels), 1);
    dim3 dimGrid(inputSize, inputSize);
@@ -169,49 +172,23 @@ bool test(int inputSize, int inputChannels, int outputChannels, int filterSize,
       outputChannels, dInput, dOutput, 
       dFilter1, dFilter2, filterSize
    );
-
-   // cudaEventRecord(funcStop);
-   // cudaEventSynchronize(funcStop);
-   // cudaEventElapsedTime(&temp, funcStart, funcStop);
-   // funcTime += temp;
-
-   // cudaEventRecord(memStart);
    status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
    if (check_error_status(status, "couldn't load device output to host"))
       return false;
-   // cudaEventRecord(memStop);
-   // cudaEventSynchronize(memStop);
-   // cudaEventElapsedTime(&temp, memStart, memStop);
-   // memTime += temp;
 
    cudaFree(dInput);
    cudaFree(dOutput);
    cudaFree(dFilter1);
    cudaFree(dFilter2);
-   // cudaEventDestroy(funcStart);
-   // cudaEventDestroy(funcStop);
-   // cudaEventDestroy(memStart);
-   // cudaEventDestroy(memStop);
    return true;
 }
 
 bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int filterSize,
       vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2
-      // , float &funcTime, float &memTime
 ) {
    cudaError_t status;
-   // cudaEvent_t funcStart, funcStop, memStart, memStop;
-   // cudaEventCreate(&funcStart); 
-   // cudaEventCreate(&funcStop);
-   // cudaEventCreate(&memStart);
-   // cudaEventCreate(&memStop);
-
-   
-
    status = cudaSetDevice(0);
    if (check_error_status(status, "cudaSetDevice fail\n")) return false;
-
-   // cudaEventRecord(memStart);
    float *dInput, *dOutput, *dFilter1, *dFilter2;
    status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
    if (check_error_status(status, "cudaMalloc fail\n"))
@@ -225,7 +202,6 @@ bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int fil
    status = cudaMalloc((void**)&dFilter2, hFilter2.size()*sizeof(float));
    if (check_error_status(status, "cudaMalloc fail\n"))
       return false;
-
    status = cudaMemcpy(dInput, hInput.data(), hInput.size()*sizeof(float), cudaMemcpyHostToDevice);
    if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
@@ -235,14 +211,7 @@ bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int fil
    status = cudaMemcpy(dFilter2, hFilter2.data(), hFilter2.size()*sizeof(float), cudaMemcpyHostToDevice);
    if (check_error_status(status, "cudaMemCpy fail\n"))
       return false;
-   
-   // cudaEventRecord(memStop);
-   // cudaEventSynchronize(memStop);
-   // float temp;
-   // cudaEventElapsedTime(&temp, memStart, memStop);
-   // memTime += temp;
 
-   // cudaEventRecord(funcStart);
    dim3 dimBlock(max(inputChannels, outputChannels), 1);
    dim3 dimGrid(inputSize, inputSize);
    depthwise_separable_convolution_toeplitz<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
@@ -250,29 +219,59 @@ bool test_toeplitz(int inputSize, int inputChannels, int outputChannels, int fil
       outputChannels, dInput, dOutput, 
       dFilter1, dFilter2, filterSize
    );
-
-   // cudaEventRecord(funcStop);
-   // cudaEventSynchronize(funcStop);
-   // cudaEventElapsedTime(&temp, funcStart, funcStop);
-   // funcTime += temp;
-
-   // cudaEventRecord(memStart);
    status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
    if (check_error_status(status, "couldn't load device output to host"))
-      return false;
-   // cudaEventRecord(memStop);
-   // cudaEventSynchronize(memStop);
-   // cudaEventElapsedTime(&temp, memStart, memStop);
-   // memTime += temp;
 
    cudaFree(dInput);
    cudaFree(dOutput);
    cudaFree(dFilter1);
    cudaFree(dFilter2);
-   // cudaEventDestroy(funcStart);
-   // cudaEventDestroy(funcStop);
-   // cudaEventDestroy(memStart);
-   // cudaEventDestroy(memStop);
+   return true;
+}
+
+bool test_nosync(int inputSize, int inputChannels, int outputChannels, int filterSize,
+      vector<float> &hInput, vector<float> &hOutput, vector<float> &hFilter1, vector<float> &hFilter2
+) {
+   cudaError_t status;
+   status = cudaSetDevice(0);
+   if (check_error_status(status, "cudaSetDevice fail\n")) return false;
+   float *dInput, *dOutput, *dFilter1, *dFilter2;
+   status = cudaMalloc((void**)&dInput, hInput.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMalloc((void**)&dOutput, hOutput.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMalloc((void**)&dFilter1, hFilter1.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMalloc((void**)&dFilter2, hFilter2.size()*sizeof(float));
+   if (check_error_status(status, "cudaMalloc fail\n"))
+      return false;
+   status = cudaMemcpy(dInput, hInput.data(), hInput.size()*sizeof(float), cudaMemcpyHostToDevice);
+   if (check_error_status(status, "cudaMemCpy fail\n"))
+      return false;
+   status = cudaMemcpy(dFilter1, hFilter1.data(), hFilter1.size()*sizeof(float), cudaMemcpyHostToDevice);
+   if (check_error_status(status, "cudaMemCpy fail\n"))
+      return false;
+   status = cudaMemcpy(dFilter2, hFilter2.data(), hFilter2.size()*sizeof(float), cudaMemcpyHostToDevice);
+   if (check_error_status(status, "cudaMemCpy fail\n"))
+      return false;
+
+   dim3 dimBlock(max(inputChannels, outputChannels), 1);
+   dim3 dimGrid(inputSize, inputSize);
+   depthwise_separable_convolution_nosync<<<dimGrid, dimBlock, dimBlock.x * sizeof(float)>>>(
+      inputSize, inputChannels,
+      outputChannels, dInput, dOutput, 
+      dFilter1, dFilter2, filterSize
+   );
+   status = cudaMemcpy(hOutput.data(), dOutput, hOutput.size()*sizeof(float), cudaMemcpyDeviceToHost);
+   if (check_error_status(status, "couldn't load device output to host"))
+
+   cudaFree(dInput);
+   cudaFree(dOutput);
+   cudaFree(dFilter1);
+   cudaFree(dFilter2);
    return true;
 }
 
@@ -417,65 +416,107 @@ bool mini_test() {
    return true;
 }
 
+/*
 void test1() {
-   // const int inputChannels = 3;
-	// const int outputChannelsArr[]{3, 8, 16, 32, 64, 128, 256};
-	// const int filterSize = 3;
-   // // mini_test();   
-   // const int testNum = 10;
-   // const int inputSizeMax = 1 << 10;
-   // ofstream res("test_res.txt");   
-   // res << "test num:" << testNum << endl;
+   const int inputChannels = 3;
+	const int outputChannelsArr[]{3, 8, 16, 32, 64, 128, 256};
+	const int filterSize = 3;
+   // mini_test();   
+   const int testNum = 10;
+   const int inputSizeMax = 1 << 10;
+   ofstream res("test_res.txt");   
+   res << "test num:" << testNum << endl;
 
-   // for (int outputChannels : outputChannelsArr) {
-   //    for (int inputSize = 256; inputSize <= inputSizeMax; inputSize <<= 1) {
-   //       vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
-   //       vector<float> hOutput(outputChannels*inputSize*inputSize);
-   //       vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
-   //       vector<float> hFilter1(inputChannels*filterSize*filterSize);
-   //       vector<float> hFilter2(inputChannels*outputChannels);
+   for (int outputChannels : outputChannelsArr) {
+      for (int inputSize = 256; inputSize <= inputSizeMax; inputSize <<= 1) {
+         vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
+         vector<float> hOutput(outputChannels*inputSize*inputSize);
+         vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+         vector<float> hFilter1(inputChannels*filterSize*filterSize);
+         vector<float> hFilter2(inputChannels*outputChannels);
 
-   //       res << "input:output(size*size) " << inputChannels << ":" << outputChannels << "(" 
-   //          << inputSize << "*" << inputSize << ")" << endl;
-   //       printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
+         res << "input:output(size*size) " << inputChannels << ":" << outputChannels << "(" 
+            << inputSize << "*" << inputSize << ")" << endl;
+         printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
          
 
-   //       float funcTime = 0, memTime = 0;
-   //       for (int i = 1; i <= testNum; i++) {
-   //          fillInput(hInput, inputChannels, inputSize);
-   //          fillFilter1(hFilter1, inputChannels, filterSize);
-   //          fillFilter2(hFilter2, inputChannels, outputChannels);
-   //          test(inputSize, inputChannels, outputChannels, filterSize,
-   //             hInput, hOutput, hFilter1, hFilter2, 
-   //             funcTime, memTime); 
-   //          // test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
-   //          //    hInput, hOutputToeplitz, hFilter1, hFilter2, 
-   //          //    funcTime, memTime);
-   //          printf("%d.pass  ", i);
-   //          if (i% 10 == 0)
-   //             printf("\n");
-   //       }
-   //       res << "   function: " << funcTime << "ms; " << "memory: " << memTime << "ms" << endl;
-   //       res << "   function avg: " << funcTime / testNum << "ms; " << "memory avg: " << memTime / testNum << "ms" << endl; 
-   //    }  
-   //    res << endl;
-   // }
-   // res.close();
+         float funcTime = 0, memTime = 0;
+         for (int i = 1; i <= testNum; i++) {
+            fillInput(hInput, inputChannels, inputSize);
+            fillFilter1(hFilter1, inputChannels, filterSize);
+            fillFilter2(hFilter2, inputChannels, outputChannels);
+            test(inputSize, inputChannels, outputChannels, filterSize,
+               hInput, hOutput, hFilter1, hFilter2, 
+               funcTime, memTime); 
+            // test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
+            //    hInput, hOutputToeplitz, hFilter1, hFilter2, 
+            //    funcTime, memTime);
+            printf("%d.pass  ", i);
+            if (i% 10 == 0)
+               printf("\n");
+         }
+         res << "   function: " << funcTime << "ms; " << "memory: " << memTime << "ms" << endl;
+         res << "   function avg: " << funcTime / testNum << "ms; " << "memory avg: " << memTime / testNum << "ms" << endl; 
+      }  
+      res << endl;
+   }
+   res.close();
 }
+*/
 
-void test2() {
-   const int inputChannels = 3;
-   const int outputChannels = 16;
-   const int inputSize = 256;
-   const int filterSize = 3;
-   const int testNum = 100;
-
+void test2(int inputChannels, int outputChannels, int inputSize, int filterSize, int testNum) {
    vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
    vector<float> hOutput(outputChannels*inputSize*inputSize);
    vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+   vector<float> hOutputNoSync(outputChannels*inputSize*inputSize);
    vector<float> hFilter1(inputChannels*filterSize*filterSize);
    vector<float> hFilter2(inputChannels*outputChannels);
 
+   printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
+   for (int i = 1; i <= testNum; i++) {
+      fillInput(hInput, inputChannels, inputSize);
+      fillFilter1(hFilter1, inputChannels, filterSize);
+      fillFilter2(hFilter2, inputChannels, outputChannels);
+      test(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutput, hFilter1, hFilter2
+      );
+      test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutputToeplitz, hFilter1, hFilter2
+      );
+      test_nosync(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutputNoSync, hFilter1, hFilter2
+      );
+      int size = hOutput.size();
+      for (int idx = 0; idx < size; idx++) {
+         if (hOutput[idx] != hOutputToeplitz[idx]) {
+            printf("%d. fail\n", i);
+            printf("Standart output: %f;  Toeplitz output:%f;\n", hOutput[idx], hOutputToeplitz[idx]);
+            printf("idx=%d", idx);
+            return;
+         }
+      }
+      printf("%d. pass  ", i);
+      if (i % 20 == 0) {
+         printf("\n");
+      }
+   }
+   printf("\n");
+}
+
+void unetx1(int inputSize, int testNum) {
+   const int filterSize = 3;
+   const int inputChannels = 3;
+   const int outputChannels = 16;
+   // depthwise_conv2d_68 - conv2d_115
+   // conv_1_1
+   printf("UNET X: depthwise_conv2d_68 - const2d_115\n");
+   printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
+   vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
+   vector<float> hOutput(outputChannels*inputSize*inputSize);
+   vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+   vector<float> hOutputNoSync(outputChannels*inputSize*inputSize);
+   vector<float> hFilter1(inputChannels*filterSize*filterSize);
+   vector<float> hFilter2(inputChannels*outputChannels);
 
    for (int i = 1; i <= testNum; i++) {
       fillInput(hInput, inputChannels, inputSize);
@@ -487,82 +528,38 @@ void test2() {
       test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
          hInput, hOutputToeplitz, hFilter1, hFilter2
       );
+      test_nosync(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutputNoSync, hFilter1, hFilter2
+      );
       int size = hOutput.size();
       for (int idx = 0; idx < size; idx++) {
          if (hOutput[idx] != hOutputToeplitz[idx]) {
             printf("%d. fail\n", i);
             printf("Standart output: %f;  Toeplitz output:%f;\n", hOutput[idx], hOutputToeplitz[idx]);
             printf("idx=%d", idx);
+            return;
          }
       }
-
       printf("%d. pass  ", i);
-      if (i % 10 == 0) {
+      if (i % 20 == 0) {
          printf("\n");
       }
    }
 }
 
-void unetx1() {
-   // depthwise_conv2d_68 - conv2d_115
-   // conv_1_1
-   const int inputSize = 256;
-   const int filterSize = 3;
-   const int inputChannels = 3;
-   const int outputChannels = 16;
-   const int testNum = 1000;
-   printf("UNET X: depthwise_conv2d_68 - const2d_115\n");
-   printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
-
-   vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
-   vector<float> hOutput(outputChannels*inputSize*inputSize);
-   vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
-   vector<float> hFilter1(inputChannels*filterSize*filterSize);
-   vector<float> hFilter2(inputChannels*outputChannels);
-
-   for (int i = 1; i <= testNum; i++) {
-      fillInput(hInput, inputChannels, inputSize);
-      fillFilter1(hFilter1, inputChannels, filterSize);
-      fillFilter2(hFilter2, inputChannels, outputChannels);
-      test(inputSize, inputChannels, outputChannels, filterSize,
-         hInput, hOutput, hFilter1, hFilter2
-      );
-      test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
-         hInput, hOutputToeplitz, hFilter1, hFilter2
-      );
-      int size = hOutput.size();
-      for (int idx = 0; idx < size; idx++) {
-         if (hOutput[idx] != hOutputToeplitz[idx]) {
-            printf("%d. fail\n", i);
-            printf("Standart output: %f;  Toeplitz output:%f;\n", hOutput[idx], hOutputToeplitz[idx]);
-            printf("idx=%d", idx);
-         }
-      }
-      // printf("%d. pass  ", i);
-      // if (i % 10 == 0) {
-      //    printf("\n");
-      // }
-      if (i % 100 == 0) {
-         printf("%d.pass  ", i);
-      }
-   }
-}
-
-void unetx2() {
+void unetx2(int inputSize, int testNum) {
    // depthwise_conv2d_72 - conv2d_119
    // conv_3_1
 
-   const int inputSize = 64;
    const int filterSize = 3;
-   const int inputChannels = 3;
-   const int outputChannels = 32;
-   const int testNum = 1000;
+   const int inputChannels = 32;
+   const int outputChannels = 64;
    printf("UNET X: depthwise_conv2d_72 - conv2d_119\n");
    printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
-
    vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
    vector<float> hOutput(outputChannels*inputSize*inputSize);
    vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+   vector<float> hOutputNoSync(outputChannels*inputSize*inputSize);
    vector<float> hFilter1(inputChannels*filterSize*filterSize);
    vector<float> hFilter2(inputChannels*outputChannels);
 
@@ -576,40 +573,39 @@ void unetx2() {
       test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
          hInput, hOutputToeplitz, hFilter1, hFilter2
       );
+      test_nosync(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutputNoSync, hFilter1, hFilter2
+      );
       int size = hOutput.size();
       for (int idx = 0; idx < size; idx++) {
          if (hOutput[idx] != hOutputToeplitz[idx]) {
             printf("%d. fail\n", i);
             printf("Standart output: %f;  Toeplitz output:%f;\n", hOutput[idx], hOutputToeplitz[idx]);
             printf("idx=%d", idx);
+            return;
          }
       }
-      // printf("%d. pass  ", i);
-      // if (i % 10 == 0) {
-      //    printf("\n");
-      // }
-      if (i % 100 == 0) {
-         printf("%d.pass  ", i);
+      printf("%d. pass  ", i);
+      if (i % 20 == 0) {
+         printf("\n");
       }
    }
 }
 
-void unetx3() {
+void unetx3(int inputSize, int testNum) {
    // depthwise_conv2d_77 - conv2d_124
    // conv_5_2
 
-
-   const int inputSize = 16;
    const int filterSize = 3;
-   const int inputChannels = 3;
+   const int inputChannels = 256;
    const int outputChannels = 256;
-   const int testNum = 1000;
    printf("UNET X: depthwise_conv2d_77 - conv2d_124\n");
    printf("input:output(size*size) %d:%d(%d*%d)\n\t", inputChannels, outputChannels, inputSize, inputSize);
 
    vector<float> hInput(inputChannels*(inputSize+2)*(inputSize+2));
    vector<float> hOutput(outputChannels*inputSize*inputSize);
    vector<float> hOutputToeplitz(outputChannels*inputSize*inputSize);
+   vector<float> hOutputNoSync(outputChannels*inputSize*inputSize);
    vector<float> hFilter1(inputChannels*filterSize*filterSize);
    vector<float> hFilter2(inputChannels*outputChannels);
 
@@ -623,28 +619,35 @@ void unetx3() {
       test_toeplitz(inputSize, inputChannels, outputChannels, filterSize,
          hInput, hOutputToeplitz, hFilter1, hFilter2
       );
+      test_nosync(inputSize, inputChannels, outputChannels, filterSize,
+         hInput, hOutputNoSync, hFilter1, hFilter2
+      );
       int size = hOutput.size();
       for (int idx = 0; idx < size; idx++) {
          if (hOutput[idx] != hOutputToeplitz[idx]) {
             printf("%d. fail\n", i);
             printf("Standart output: %f;  Toeplitz output:%f;\n", hOutput[idx], hOutputToeplitz[idx]);
             printf("idx=%d", idx);
+            return;
          }
       }
-      // printf("%d. pass  ", i);
-      // if (i % 10 == 0) {
-      //    printf("\n");
-      // }
-      if (i % 100 == 0) {
-         printf("%d.pass  ", i);
+      printf("%d. pass  ", i);
+      if (i % 20 == 0) {
+         printf("\n");
       }
    }
 }
 
 int main() {
-	// test1();
-   // test2();
-   unetx1();
-   // unetx2();
-   // unetx3();
+   int testNum = 10;
+   int inputSize = 1024;
+
+   // default input - 256 (3:16)
+   unetx1(inputSize, testNum);
+
+   // default input - 64 (32:64)
+   // unetx2(inputSize, testNum);
+
+   // default input - 16 (256:256)
+   // unetx3(inputSize, testNum);
 }
